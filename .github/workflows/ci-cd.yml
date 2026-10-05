@@ -14,7 +14,6 @@ permissions:
 
 env:
   APP_NAME: myprofile
-  DOCKER_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/myprofile
 
 jobs:
 
@@ -29,7 +28,7 @@ jobs:
     steps:
 
       # ----------------------------------------------------------
-      # 1. Checkout repository
+      # 1. Checkout source code
       # ----------------------------------------------------------
 
       - name: Checkout source code
@@ -48,7 +47,7 @@ jobs:
 
 
       # ----------------------------------------------------------
-      # 3. Install dependencies
+      # 3. Install Python dependencies
       # ----------------------------------------------------------
 
       - name: Install Python dependencies
@@ -58,7 +57,7 @@ jobs:
 
 
       # ----------------------------------------------------------
-      # 4. Python application tests
+      # 4. Validate Python application
       # ----------------------------------------------------------
 
       - name: Validate Python application
@@ -74,21 +73,21 @@ jobs:
 
               response = client.get("/")
 
-              print("Home page:", response.status_code)
+              print("Home page status:", response.status_code)
 
               if response.status_code != 200:
                   raise SystemExit("Home page test failed")
 
               response = client.get("/health")
 
-              print("Health endpoint:", response.status_code)
+              print("Health endpoint status:", response.status_code)
 
               if response.status_code != 200:
                   raise SystemExit("Health endpoint test failed")
 
               response = client.get("/metrics")
 
-              print("Metrics endpoint:", response.status_code)
+              print("Metrics endpoint status:", response.status_code)
 
               if response.status_code != 200:
                   raise SystemExit("Metrics endpoint test failed")
@@ -105,13 +104,12 @@ jobs:
         run: |
           docker build \
             -t ${APP_NAME}:test \
-            -t ${DOCKER_IMAGE}:${GITHUB_SHA} \
-            -t ${DOCKER_IMAGE}:latest \
+            -t ${APP_NAME}:${GITHUB_SHA} \
             .
 
 
       # ----------------------------------------------------------
-      # 6. Start application container
+      # 6. Start test container
       # ----------------------------------------------------------
 
       - name: Start MyProfile container
@@ -132,7 +130,7 @@ jobs:
 
           set -e
 
-          echo "Waiting for MyProfile..."
+          echo "Waiting for MyProfile application..."
 
           for i in {1..30}; do
 
@@ -147,13 +145,12 @@ jobs:
 
             fi
 
-            echo "Attempt $i/30"
-
+            echo "Attempt $i/30..."
             sleep 2
 
           done
 
-          echo "Application failed to start"
+          echo "Application failed to start."
 
           docker logs ${APP_NAME}-test
 
@@ -161,7 +158,7 @@ jobs:
 
 
       # ----------------------------------------------------------
-      # 8. Home page test
+      # 8. Test home page
       # ----------------------------------------------------------
 
       - name: Test home page
@@ -176,7 +173,7 @@ jobs:
 
 
       # ----------------------------------------------------------
-      # 9. Prometheus metrics test
+      # 9. Test Prometheus metrics endpoint
       # ----------------------------------------------------------
 
       - name: Test Prometheus metrics
@@ -227,22 +224,43 @@ jobs:
 
 
       # ----------------------------------------------------------
-      # 13. Push exact tested image
+      # 13. Tag the already-tested Docker image
+      # ----------------------------------------------------------
+
+      - name: Tag Docker image
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+        run: |
+          docker tag \
+            ${APP_NAME}:${GITHUB_SHA} \
+            ${DOCKERHUB_USERNAME}/${APP_NAME}:${GITHUB_SHA}
+
+          docker tag \
+            ${APP_NAME}:${GITHUB_SHA} \
+            ${DOCKERHUB_USERNAME}/${APP_NAME}:latest
+
+
+      # ----------------------------------------------------------
+      # 14. Push the already-tested image
       # ----------------------------------------------------------
 
       - name: Push Docker image
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
         run: |
+          docker push \
+            ${DOCKERHUB_USERNAME}/${APP_NAME}:${GITHUB_SHA}
 
-          docker push ${DOCKER_IMAGE}:${GITHUB_SHA}
+          docker push \
+            ${DOCKERHUB_USERNAME}/${APP_NAME}:latest
 
-          docker push ${DOCKER_IMAGE}:latest
-
-          echo "Docker Hub push completed"
+          echo "Docker Hub push completed successfully"
 
 
   # ============================================================
-  # DEPLOY TO EC2 / K3S USING AWS SSM
+  # DEPLOY TO K3S USING AWS SYSTEMS MANAGER
   # ============================================================
 
   deploy:
@@ -257,18 +275,19 @@ jobs:
     steps:
 
       # ----------------------------------------------------------
-      # 14. Checkout repository
+      # 15. Checkout repository
       # ----------------------------------------------------------
 
-      - name: Checkout deployment manifests
+      - name: Checkout deployment configuration
         uses: actions/checkout@v4
 
 
       # ----------------------------------------------------------
-      # 15. Configure AWS credentials
+      # 16. Configure AWS credentials
       #
-      # OIDC is unavailable in your AWS organization, so this
-      # workflow uses the AWS credentials stored as GitHub secrets.
+      # OIDC cannot be used in your AWS organization because the
+      # required IAM OIDC provider is blocked by an SCP.
+      # Therefore these are GitHub repository secrets.
       # ----------------------------------------------------------
 
       - name: Configure AWS credentials
@@ -280,7 +299,7 @@ jobs:
 
 
       # ----------------------------------------------------------
-      # 16. Verify EC2 is reachable through SSM
+      # 17. Verify EC2 is registered with SSM
       # ----------------------------------------------------------
 
       - name: Verify EC2 SSM connectivity
@@ -289,9 +308,9 @@ jobs:
           AWS_REGION: ${{ secrets.AWS_REGION }}
         run: |
 
-          set -e
+          set -euo pipefail
 
-          echo "Checking SSM managed instance..."
+          echo "Checking EC2 SSM status..."
 
           aws ssm describe-instance-information \
             --region "${AWS_REGION}" \
@@ -301,25 +320,18 @@ jobs:
 
 
       # ----------------------------------------------------------
-      # 17. Send deployment command to EC2 using SSM
+      # 18. Create SSM deployment script
       # ----------------------------------------------------------
 
-      - name: Deploy MyProfile using SSM
+      - name: Create SSM deployment script
         env:
-          EC2_INSTANCE_ID: ${{ secrets.EC2_INSTANCE_ID }}
-          AWS_REGION: ${{ secrets.AWS_REGION }}
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
           GITHUB_SHA: ${{ github.sha }}
-
-        shell: bash
-
         run: |
 
           set -euo pipefail
 
-          echo "Preparing SSM deployment script..."
-
-          cat > deploy-ssm.sh <<EOF
+          cat > deploy-ssm.sh <<'REMOTE_SCRIPT'
           #!/bin/bash
 
           set -euo pipefail
@@ -327,94 +339,170 @@ jobs:
           export KUBECONFIG=/home/ubuntu/.kube/config
 
           NAMESPACE="myprofile"
-          IMAGE="${DOCKERHUB_USERNAME}/myprofile:${GITHUB_SHA}"
+          WORKDIR="/tmp/myprofile-k8s-GITHUB_SHA_PLACEHOLDER"
 
-          WORKDIR="/tmp/myprofile-k8s-${GITHUB_SHA}"
+          IMAGE="DOCKER_IMAGE_PLACEHOLDER"
 
           echo "=========================================="
-          echo "MyProfile SSM deployment"
+          echo "MyProfile Kubernetes Deployment"
           echo "=========================================="
 
-          echo "Image:"
-          echo "\${IMAGE}"
+          echo "Namespace : ${NAMESPACE}"
+          echo "Image     : ${IMAGE}"
 
-          echo "Creating temporary directory..."
+          # ------------------------------------------------------
+          # Prepare temporary workspace
+          # ------------------------------------------------------
 
-          rm -rf "\${WORKDIR}"
-          mkdir -p "\${WORKDIR}"
+          rm -rf "${WORKDIR}"
+          mkdir -p "${WORKDIR}"
 
-          cd "\${WORKDIR}"
+          cd "${WORKDIR}"
 
-          echo "Downloading Kubernetes manifests..."
+
+          # ------------------------------------------------------
+          # Download Kubernetes manifests from the exact commit
+          # ------------------------------------------------------
+
+          echo "Downloading namespace.yaml..."
 
           curl -fsSL \
-            "https://raw.githubusercontent.com/haque-ashanur/myprofile_v2/${GITHUB_SHA}/k8s/namespace.yaml" \
+            "https://raw.githubusercontent.com/haque-ashanur/myprofile_v2/GITHUB_SHA_PLACEHOLDER/k8s/namespace.yaml" \
             -o namespace.yaml
 
+
+          echo "Downloading deployment.yaml..."
+
           curl -fsSL \
-            "https://raw.githubusercontent.com/haque-ashanur/myprofile_v2/${GITHUB_SHA}/k8s/deployment.yaml" \
+            "https://raw.githubusercontent.com/haque-ashanur/myprofile_v2/GITHUB_SHA_PLACEHOLDER/k8s/deployment.yaml" \
             -o deployment.yaml
 
+
+          echo "Downloading service.yaml..."
+
           curl -fsSL \
-            "https://raw.githubusercontent.com/haque-ashanur/myprofile_v2/${GITHUB_SHA}/k8s/service.yaml" \
+            "https://raw.githubusercontent.com/haque-ashanur/myprofile_v2/GITHUB_SHA_PLACEHOLDER/k8s/service.yaml" \
             -o service.yaml
 
+
+          echo "Downloading ingress.yaml..."
+
           curl -fsSL \
-            "https://raw.githubusercontent.com/haque-ashanur/myprofile_v2/${GITHUB_SHA}/k8s/ingress.yaml" \
+            "https://raw.githubusercontent.com/haque-ashanur/myprofile_v2/GITHUB_SHA_PLACEHOLDER/k8s/ingress.yaml" \
             -o ingress.yaml
 
-          echo "Updating Docker image..."
+
+          # ------------------------------------------------------
+          # Replace Docker Hub placeholder
+          # ------------------------------------------------------
+
+          echo "Configuring Docker image..."
 
           sed -i \
-            "s|YOUR_DOCKERHUB_USERNAME/myprofile:latest|\${IMAGE}|g" \
+            "s|YOUR_DOCKERHUB_USERNAME/myprofile:latest|${IMAGE}|g" \
             deployment.yaml
+
+
+          # ------------------------------------------------------
+          # Deploy namespace
+          # ------------------------------------------------------
 
           echo "Applying namespace..."
 
           kubectl apply \
             -f namespace.yaml
 
+
+          # ------------------------------------------------------
+          # Deploy application
+          # ------------------------------------------------------
+
           echo "Applying deployment..."
 
           kubectl apply \
             -f deployment.yaml
+
+
+          # ------------------------------------------------------
+          # Deploy service
+          # ------------------------------------------------------
 
           echo "Applying service..."
 
           kubectl apply \
             -f service.yaml
 
+
+          # ------------------------------------------------------
+          # Deploy ingress
+          # ------------------------------------------------------
+
           echo "Applying ingress..."
 
           kubectl apply \
             -f ingress.yaml
 
-          echo "Waiting for rollout..."
+
+          # ------------------------------------------------------
+          # Wait for rolling update
+          # ------------------------------------------------------
+
+          echo
+          echo "Waiting for MyProfile rollout..."
 
           kubectl \
-            -n "\${NAMESPACE}" \
+            -n "${NAMESPACE}" \
             rollout status \
             deployment/myprofile \
             --timeout=180s
 
+
+          # ------------------------------------------------------
+          # Show pods
+          # ------------------------------------------------------
+
           echo
           echo "=========================================="
-          echo "Pods"
+          echo "MyProfile Pods"
           echo "=========================================="
 
           kubectl \
-            -n "\${NAMESPACE}" \
+            -n "${NAMESPACE}" \
             get pods \
             -o wide
 
+
+          # ------------------------------------------------------
+          # Show deployment
+          # ------------------------------------------------------
+
           echo
           echo "=========================================="
-          echo "Services"
+          echo "Deployment"
           echo "=========================================="
 
           kubectl \
-            -n "\${NAMESPACE}" \
-            get svc
+            -n "${NAMESPACE}" \
+            get deployment
+
+
+          # ------------------------------------------------------
+          # Show service
+          # ------------------------------------------------------
+
+          echo
+          echo "=========================================="
+          echo "Service"
+          echo "=========================================="
+
+          kubectl \
+            -n "${NAMESPACE}" \
+            get service
+
+
+          # ------------------------------------------------------
+          # Show ingress
+          # ------------------------------------------------------
 
           echo
           echo "=========================================="
@@ -422,36 +510,103 @@ jobs:
           echo "=========================================="
 
           kubectl \
-            -n "\${NAMESPACE}" \
+            -n "${NAMESPACE}" \
             get ingress
+
+
+          # ------------------------------------------------------
+          # Final status
+          # ------------------------------------------------------
 
           echo
           echo "=========================================="
-          echo "Deployment successful"
+          echo "MyProfile deployment SUCCESS"
           echo "=========================================="
 
-          rm -rf "\${WORKDIR}"
+          # Cleanup
+          rm -rf "${WORKDIR}"
 
-          EOF
+          REMOTE_SCRIPT
 
-          chmod +x deploy-ssm.sh
 
-          echo "Sending command to EC2..."
+          # ------------------------------------------------------
+          # Replace placeholders
+          # ------------------------------------------------------
+
+          sed -i \
+            "s|DOCKER_IMAGE_PLACEHOLDER|${DOCKERHUB_USERNAME}/myprofile:${GITHUB_SHA}|g" \
+            deploy-ssm.sh
+
+          sed -i \
+            "s|GITHUB_SHA_PLACEHOLDER|${GITHUB_SHA}|g" \
+            deploy-ssm.sh
+
+
+      # ----------------------------------------------------------
+      # 19. Convert script into valid SSM JSON
+      # ----------------------------------------------------------
+
+      - name: Create SSM parameters JSON
+        run: |
+
+          set -euo pipefail
+
+          jq -n \
+            --rawfile script deploy-ssm.sh \
+            '{commands: [$script]}' \
+            > ssm-parameters.json
+
+          echo "SSM parameters JSON created successfully."
+
+
+      # ----------------------------------------------------------
+      # 20. Send command to EC2
+      # ----------------------------------------------------------
+
+      - name: Send deployment command through SSM
+        env:
+          EC2_INSTANCE_ID: ${{ secrets.EC2_INSTANCE_ID }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          GITHUB_SHA: ${{ github.sha }}
+        run: |
+
+          set -euo pipefail
+
+          echo "Sending deployment command to EC2..."
 
           COMMAND_ID=$(aws ssm send-command \
             --region "${AWS_REGION}" \
             --instance-ids "${EC2_INSTANCE_ID}" \
             --document-name "AWS-RunShellScript" \
-            --comment "Deploy MyProfile ${GITHUB_SHA}" \
-            --parameters "commands=$(cat deploy-ssm.sh)" \
+            --comment "MyProfile deployment ${GITHUB_SHA}" \
+            --parameters file://ssm-parameters.json \
             --timeout-seconds 600 \
             --max-errors "0" \
             --query "Command.CommandId" \
             --output text)
 
-          echo "SSM Command ID: ${COMMAND_ID}"
+          echo "SSM Command ID:"
+          echo "${COMMAND_ID}"
 
-          echo "Waiting for EC2 deployment..."
+          echo "${COMMAND_ID}" > ssm-command-id.txt
+
+
+      # ----------------------------------------------------------
+      # 21. Wait for SSM command
+      # ----------------------------------------------------------
+
+      - name: Wait for EC2 deployment
+        env:
+          EC2_INSTANCE_ID: ${{ secrets.EC2_INSTANCE_ID }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          GITHUB_SHA: ${{ github.sha }}
+        run: |
+
+          set -euo pipefail
+
+          COMMAND_ID=$(cat ssm-command-id.txt)
+
+          echo "Waiting for SSM execution..."
 
           for i in {1..60}; do
 
@@ -462,14 +617,16 @@ jobs:
               --query "Status" \
               --output text)
 
+            echo "Attempt ${i}/60"
             echo "SSM status: ${STATUS}"
 
             case "${STATUS}" in
 
               Success)
+
                 echo
                 echo "=========================================="
-                echo "SSM deployment completed successfully"
+                echo "SSM deployment SUCCESS"
                 echo "=========================================="
 
                 aws ssm get-command-invocation \
@@ -483,13 +640,15 @@ jobs:
                 ;;
 
               Failed|Cancelled|TimedOut|DeliveryTimedOut|Undeliverable)
+
                 echo
                 echo "=========================================="
                 echo "SSM deployment FAILED"
                 echo "=========================================="
 
                 echo
-                echo "STDOUT:"
+                echo "---------- STDOUT ----------"
+
                 aws ssm get-command-invocation \
                   --region "${AWS_REGION}" \
                   --command-id "${COMMAND_ID}" \
@@ -498,7 +657,8 @@ jobs:
                   --output text
 
                 echo
-                echo "STDERR:"
+                echo "---------- STDERR ----------"
+
                 aws ssm get-command-invocation \
                   --region "${AWS_REGION}" \
                   --command-id "${COMMAND_ID}" \
@@ -517,6 +677,107 @@ jobs:
 
           done
 
-          echo "SSM deployment timed out."
+          echo "SSM execution timed out."
 
+          exit 1
+
+
+      # ----------------------------------------------------------
+      # 22. Final deployment verification
+      # ----------------------------------------------------------
+
+      - name: Verify Kubernetes deployment
+        env:
+          EC2_INSTANCE_ID: ${{ secrets.EC2_INSTANCE_ID }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+        run: |
+
+          set -euo pipefail
+
+          cat > verify-ssm.json <<'EOF'
+          {
+            "commands": [
+              "export KUBECONFIG=/home/ubuntu/.kube/config",
+              "echo '--- Nodes ---'",
+              "kubectl get nodes",
+              "echo '--- MyProfile Pods ---'",
+              "kubectl -n myprofile get pods -o wide",
+              "echo '--- Deployment ---'",
+              "kubectl -n myprofile get deployment myprofile",
+              "echo '--- Service ---'",
+              "kubectl -n myprofile get service"
+            ]
+          }
+          EOF
+
+          echo "Running final Kubernetes verification..."
+
+          VERIFY_COMMAND_ID=$(aws ssm send-command \
+            --region "${AWS_REGION}" \
+            --instance-ids "${EC2_INSTANCE_ID}" \
+            --document-name "AWS-RunShellScript" \
+            --comment "Verify MyProfile deployment" \
+            --parameters file://verify-ssm.json \
+            --timeout-seconds 120 \
+            --max-errors "0" \
+            --query "Command.CommandId" \
+            --output text)
+
+          echo "Verification Command ID:"
+          echo "${VERIFY_COMMAND_ID}"
+
+          for i in {1..30}; do
+
+            STATUS=$(aws ssm get-command-invocation \
+              --region "${AWS_REGION}" \
+              --command-id "${VERIFY_COMMAND_ID}" \
+              --instance-id "${EC2_INSTANCE_ID}" \
+              --query "Status" \
+              --output text)
+
+            echo "Verification status: ${STATUS}"
+
+            case "${STATUS}" in
+
+              Success)
+
+                echo
+                echo "=========================================="
+                echo "Kubernetes verification SUCCESS"
+                echo "=========================================="
+
+                aws ssm get-command-invocation \
+                  --region "${AWS_REGION}" \
+                  --command-id "${VERIFY_COMMAND_ID}" \
+                  --instance-id "${EC2_INSTANCE_ID}" \
+                  --query "StandardOutputContent" \
+                  --output text
+
+                exit 0
+                ;;
+
+              Failed|Cancelled|TimedOut|DeliveryTimedOut|Undeliverable)
+
+                echo
+                echo "Kubernetes verification FAILED"
+
+                aws ssm get-command-invocation \
+                  --region "${AWS_REGION}" \
+                  --command-id "${VERIFY_COMMAND_ID}" \
+                  --instance-id "${EC2_INSTANCE_ID}" \
+                  --query "StandardErrorContent" \
+                  --output text
+
+                exit 1
+                ;;
+
+              *)
+                sleep 5
+                ;;
+
+            esac
+
+          done
+
+          echo "Kubernetes verification timed out."
           exit 1
