@@ -1,0 +1,46 @@
+#!/bin/bash
+set -euxo pipefail
+
+exec > >(tee /var/log/myprofile-bootstrap.log | logger -t myprofile-bootstrap -s 2>/dev/console) 2>&1
+
+dnf install -y curl unzip
+
+# K3s single-node Kubernetes server for the portfolio environment.
+curl -sfL https://get.k3s.io | sh -
+
+systemctl enable k3s
+systemctl start k3s
+
+# Install Helm.
+curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+
+# Install the unified CloudWatch agent.
+rpm -Uvh https://amazoncloudwatch-agent.s3.amazonaws.com/amazon_linux/amd64/latest/amazon-cloudwatch-agent.rpm
+
+mkdir -p /opt/aws/amazon-cloudwatch-agent/etc
+cat > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json <<'CWEOF'
+${cloudwatch_config}
+CWEOF
+
+# SSM Agent is normally available on current AWS-provided Amazon Linux images.
+systemctl enable amazon-ssm-agent || true
+systemctl start amazon-ssm-agent || true
+
+/opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
+  -a fetch-config \
+  -m ec2 \
+  -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json \
+  -s
+
+# Make kubeconfig available to ec2-user without changing the cluster's root-owned copy.
+mkdir -p /home/ec2-user/.kube
+cp /etc/rancher/k3s/k3s.yaml /home/ec2-user/.kube/config
+chown -R ec2-user:ec2-user /home/ec2-user/.kube
+chmod 600 /home/ec2-user/.kube/config
+
+cat >/etc/profile.d/k3s-kubeconfig.sh <<'PROFILE'
+export KUBECONFIG=/home/ec2-user/.kube/config
+PROFILE
+
+# Basic readiness marker.
+echo "MyProfile EC2 bootstrap complete" > /var/log/myprofile-ready

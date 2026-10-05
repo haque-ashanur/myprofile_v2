@@ -1,0 +1,30 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: myprofile-alerts
+  namespace: myprofile
+  labels:
+    release: kube-prometheus-stack
+spec:
+  groups:
+    - name: myprofile.rules
+      rules:
+        - alert: MyProfileTargetDown
+          expr: up{namespace="myprofile",service="myprofile"} == 0
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: MyProfile target is down
+            description: Prometheus cannot scrape the MyProfile service in the myprofile namespace.
+        - alert: MyProfileHighErrorRate
+          expr: |
+            sum(rate(myprofile_http_requests_total{namespace="myprofile",status=~"5.."}[5m]))
+            /
+            sum(rate(myprofile_http_requests_total{namespace="myprofile"}[5m])) > 0.05
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: High MyProfile HTTP 5xx rate
+            description: More than 5% of MyProfile requests have returned HTTP 5xx for 5 minutes.

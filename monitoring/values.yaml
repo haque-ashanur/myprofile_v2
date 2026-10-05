@@ -1,0 +1,15 @@
+prometheus:
+  prometheusSpec:
+    serviceMonitorSelectorNilUsesHelmValues: true
+    podMonitorSelectorNilUsesHelmValues: true
+
+grafana:
+  enabled: true
+  service:
+    type: ClusterIP
+
+defaultRules:
+  create: true
+
+alertmanager:
+  enabled: true
